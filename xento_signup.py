@@ -30,7 +30,7 @@ class XentoSignup:
         self._playwright = None
 
     async def start(self):
-        """Launch browser"""
+        """Launch browser with resource-efficient settings"""
         self._playwright = await async_playwright().start()
         self.browser = await self._playwright.chromium.launch(
             headless=self.headless,
@@ -39,14 +39,25 @@ class XentoSignup:
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
-                '--window-size=1280,720'
+                '--disable-software-rasterizer',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-sync',
+                '--metrics-recording-only',
+                '--no-first-run',
+                '--safebrowsing-disable-auto-update',
+                '--window-size=1280,720',
+                '--single-process',
             ]
         )
         self.context = await self.browser.new_context(
             viewport={"width": 1280, "height": 720},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            ignore_https_errors=True,
         )
         self.page = await self.context.new_page()
+        # Set default timeout
+        self.page.set_default_timeout(30000)
         logger.info("Browser launched")
 
     async def close(self):
@@ -193,46 +204,89 @@ class XentoSignup:
         # Return as-is and let the site validate
         return input_str.strip().upper()
 
-    async def _click_signin(self) -> bool:
-        """Click the sign-in button on the homepage"""
-        try:
-            # Try multiple selectors for the sign-in button
-            selectors = [
-                'button:has-text("Sign in")',
-                'a:has-text("Sign in")',
-                'button:has-text("Get started")',
-                'button:has-text("Start winning")',
-                '[data-testid="signin"]',
-                'text=Sign in',
-            ]
+    async def _safe_goto(self, url: str, max_retries: int = 2) -> bool:
+        """Navigate to URL with retry on page crash"""
+        for attempt in range(max_retries):
+            try:
+                await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                # Wait for page to be interactive
+                await asyncio.sleep(3)
+                # Verify page is alive
+                await self.page.evaluate("1+1")
+                return True
+            except Exception as e:
+                err_str = str(e)
+                if "crashed" in err_str.lower() or "target closed" in err_str.lower():
+                    logger.warning(f"Page crashed on attempt {attempt+1}, retrying...")
+                    if attempt < max_retries - 1:
+                        # Recreate page
+                        try:
+                            await self.page.close()
+                        except Exception:
+                            pass
+                        self.page = await self.context.new_page()
+                        await asyncio.sleep(2)
+                    continue
+                else:
+                    logger.error(f"Navigation error: {e}")
+                    return False
+        return False
 
-            for selector in selectors:
-                try:
-                    element = self.page.locator(selector).first
-                    if await element.is_visible(timeout=3000):
-                        await element.click()
-                        logger.info(f"Clicked sign-in via: {selector}")
+    async def _click_signin(self) -> bool:
+        """Click the sign-in button on the homepage (with retry)"""
+        for attempt in range(3):
+            try:
+                # Try multiple selectors for the sign-in button
+                selectors = [
+                    'button:has-text("Sign in")',
+                    'a:has-text("Sign in")',
+                    'button:has-text("Get started")',
+                    'button:has-text("Start winning")',
+                    '[data-testid="signin"]',
+                    'text=Sign in',
+                ]
+
+                for selector in selectors:
+                    try:
+                        element = self.page.locator(selector).first
+                        if await element.is_visible(timeout=3000):
+                            await element.click()
+                            logger.info(f"Clicked sign-in via: {selector}")
+                            await asyncio.sleep(2)
+                            return True
+                    except Exception:
+                        continue
+
+                # Fallback: try to find any button with sign-in text
+                buttons = await self.page.query_selector_all('button, a')
+                for btn in buttons:
+                    text = await btn.text_content()
+                    if text and ('sign in' in text.lower() or 'get started' in text.lower() or 'start winning' in text.lower()):
+                        await btn.click()
+                        logger.info(f"Clicked button: {text}")
                         await asyncio.sleep(2)
                         return True
-                except Exception:
+
+                if attempt < 2:
+                    logger.warning(f"Sign-in button not found (attempt {attempt+1}/3), waiting and retrying...")
+                    await asyncio.sleep(3)
+                    # Try reloading page
+                    try:
+                        await self.page.reload(wait_until="domcontentloaded", timeout=15000)
+                        await asyncio.sleep(3)
+                    except Exception:
+                        pass
                     continue
 
-            # Fallback: try to find any button with sign-in text
-            buttons = await self.page.query_selector_all('button, a')
-            for btn in buttons:
-                text = await btn.text_content()
-                if text and ('sign in' in text.lower() or 'get started' in text.lower() or 'start winning' in text.lower()):
-                    await btn.click()
-                    logger.info(f"Clicked button: {text}")
-                    await asyncio.sleep(2)
-                    return True
+            except Exception as e:
+                logger.error(f"Error clicking sign-in: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(3)
+                    continue
+                return False
 
-            logger.warning("No sign-in button found")
-            return False
-
-        except Exception as e:
-            logger.error(f"Error clicking sign-in: {e}")
-            return False
+        logger.warning("No sign-in button found after 3 attempts")
+        return False
 
     async def _enter_email(self, email: str) -> bool:
         """Enter email in the Privy auth modal"""
