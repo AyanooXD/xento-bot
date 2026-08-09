@@ -58,8 +58,8 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
 
-# Max parallel browser instances for /mass (reduced from 7 for stability)
-MAX_CONCURRENT_ACCOUNTS = int(os.environ.get("MAX_CONCURRENT_ACCOUNTS", "5"))
+# Max parallel browser instances for /mass (3 = stable, 5 = aggressive)
+MAX_CONCURRENT_ACCOUNTS = int(os.environ.get("MAX_CONCURRENT_ACCOUNTS", "3"))
 # Max accounts allowed in one /mass command
 MAX_MASS_LIMIT = int(os.environ.get("MAX_MASS_LIMIT", "500"))
 
@@ -605,8 +605,12 @@ async def _run_mass_creation(
                         code = referral_code.strip().upper()
                     url = f"https://xento.org/?ref={code}"
 
-                await signup.page.goto(url, wait_until="networkidle", timeout=30000)
-                await asyncio.sleep(3)
+                goto_ok = await signup._safe_goto(url)
+                if not goto_ok:
+                    async with progress_lock:
+                        accounts_status[account_num] = {"status": "failed", "email": email, "error": "Page load failed"}
+                    await update_progress(force=True)
+                    return
 
                 # ── Step 3: Click sign-in and enter email (with retry) ──
                 async with progress_lock:
@@ -896,8 +900,14 @@ async def _create_account(chat_id: int, context: ContextTypes.DEFAULT_TYPE, refe
                 code = referral_code.strip().upper()
             url = f"https://xento.org/?ref={code}"
 
-        await signup.page.goto(url, wait_until="networkidle", timeout=30000)
-        await asyncio.sleep(3)
+        goto_ok = await signup._safe_goto(url)
+        if not goto_ok:
+            await status_msg.edit_text(
+                "❌ *Failed\\!*\n\n"
+                "Page load nahi ho paya\\. Dobara try karo: /create",
+                parse_mode="MarkdownV2",
+            )
+            return
 
         # ── Step 3: Click sign-in and enter email ──
         await status_msg.edit_text(
@@ -1122,8 +1132,7 @@ async def cmd_quest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Launch browser and navigate to xento.org
         await signup.start()
-        await signup.page.goto("https://xento.org", wait_until="networkidle", timeout=30000)
-        await asyncio.sleep(2)
+        await signup._safe_goto("https://xento.org")
 
         status_msg = await context.bot.send_message(
             chat_id, "⏳ Quests shuru kar raha hoon..."
