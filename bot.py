@@ -58,10 +58,10 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
 
-# Max parallel browser instances for /mass
-MAX_CONCURRENT_ACCOUNTS = 7
+# Max parallel browser instances for /mass (reduced from 7 for stability)
+MAX_CONCURRENT_ACCOUNTS = int(os.environ.get("MAX_CONCURRENT_ACCOUNTS", "5"))
 # Max accounts allowed in one /mass command
-MAX_MASS_LIMIT = 500
+MAX_MASS_LIMIT = int(os.environ.get("MAX_MASS_LIMIT", "500"))
 
 # Active creation tasks per chat
 active_tasks = {}
@@ -532,17 +532,21 @@ async def _run_mass_creation(
     async def create_single_account(account_num: int, semaphore: asyncio.Semaphore):
         """Create a single account within the semaphore-controlled pool"""
         async with semaphore:
+            # Stagger: random delay 0-3s to avoid all browsers launching at once
+            stagger = random.uniform(0, 3)
+            await asyncio.sleep(stagger)
+            
             # Mark as creating
             async with progress_lock:
                 accounts_status[account_num] = {"status": "creating", "step": "Generating email..."}
             await update_progress()
 
-            signup = XentoSignup(headless=True)
-            temp_mail = TempMail()
+            signup = None
+            temp_mail = None
             email = None
 
             try:
-                # ── Step 1: Create temp email (with retry) ──
+                # ── Step 1: Create temp email (with retry across providers) ──
                 email = None
                 for email_attempt in range(3):
                     temp_mail = TempMail()
@@ -552,7 +556,7 @@ async def _run_mass_creation(
                         logger.info(f"[Mass #{account_num}] Email created via {provider_name}: {email}")
                         break
                     logger.warning(f"[Mass #{account_num}] Email attempt {email_attempt+1}/3 failed, retrying...")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
 
                 if not email:
                     async with progress_lock:
@@ -562,15 +566,32 @@ async def _run_mass_creation(
 
                 provider_name = getattr(temp_mail._provider, 'name', '?') if temp_mail._provider else '?'
                 async with progress_lock:
-                    accounts_status[account_num] = {"status": "creating", "email": email, "step": f"Email ready ({provider_name})"}
+                    accounts_status[account_num] = {"status": "creating", "email": email, "step": f"Email ({provider_name})"}
                 await update_progress()
 
-                # ── Step 2: Launch browser ──
+                # ── Step 2: Launch browser (with retry) ──
                 async with progress_lock:
                     accounts_status[account_num]["step"] = "Opening browser..."
                 await update_progress()
 
-                await signup.start()
+                signup = XentoSignup(headless=True)
+                browser_launched = False
+                for browser_attempt in range(2):
+                    try:
+                        await signup.start()
+                        browser_launched = True
+                        break
+                    except Exception as be:
+                        logger.warning(f"[Mass #{account_num}] Browser launch attempt {browser_attempt+1}/2 failed: {be}")
+                        if browser_attempt < 1:
+                            await asyncio.sleep(3)
+                            signup = XentoSignup(headless=True)
+
+                if not browser_launched:
+                    async with progress_lock:
+                        accounts_status[account_num] = {"status": "failed", "email": email, "error": "Browser launch failed"}
+                    await update_progress(force=True)
+                    return
 
                 # Navigate with referral
                 url = "https://xento.org"
@@ -587,7 +608,7 @@ async def _run_mass_creation(
                 await signup.page.goto(url, wait_until="networkidle", timeout=30000)
                 await asyncio.sleep(3)
 
-                # ── Step 3: Click sign-in and enter email ──
+                # ── Step 3: Click sign-in and enter email (with retry) ──
                 async with progress_lock:
                     accounts_status[account_num]["step"] = "Signing in..."
                 await update_progress()
@@ -601,7 +622,15 @@ async def _run_mass_creation(
 
                 await asyncio.sleep(2)
 
-                email_ok = await signup._enter_email(email)
+                # Enter email with retry (sometimes modal isn't ready)
+                email_ok = False
+                for email_entry_attempt in range(2):
+                    email_ok = await signup._enter_email(email)
+                    if email_ok:
+                        break
+                    logger.warning(f"[Mass #{account_num}] Email entry attempt {email_entry_attempt+1}/2 failed")
+                    await asyncio.sleep(3)
+
                 if not email_ok:
                     async with progress_lock:
                         accounts_status[account_num] = {"status": "failed", "email": email, "error": "Email entry failed"}
@@ -610,14 +639,14 @@ async def _run_mass_creation(
 
                 await asyncio.sleep(2)
 
-                # ── Step 4: Wait for OTP ──
+                # ── Step 4: Wait for OTP (increased timeout 150s) ──
                 async with progress_lock:
                     accounts_status[account_num]["step"] = "Waiting for OTP..."
                 await update_progress()
 
                 loop = asyncio.get_event_loop()
                 otp_code = await loop.run_in_executor(
-                    None, temp_mail.wait_for_otp, 120, 5
+                    None, temp_mail.wait_for_otp, 150, 4
                 )
 
                 if not otp_code:
@@ -717,11 +746,13 @@ async def _run_mass_creation(
                 await update_progress(force=True)
             finally:
                 try:
-                    await signup.close()
+                    if signup:
+                        await signup.close()
                 except Exception:
                     pass
                 try:
-                    temp_mail.cleanup()
+                    if temp_mail:
+                        temp_mail.cleanup()
                 except Exception:
                     pass
 
@@ -919,7 +950,7 @@ async def _create_account(chat_id: int, context: ContextTypes.DEFAULT_TYPE, refe
         logger.info(f"[Chat {chat_id}] Step 4: Waiting for OTP...")
         loop = asyncio.get_event_loop()
         otp_code = await loop.run_in_executor(
-            None, temp_mail.wait_for_otp, 120, 5
+            None, temp_mail.wait_for_otp, 150, 4
         )
         logger.info(f"[Chat {chat_id}] Step 4: OTP result={otp_code}")
 
