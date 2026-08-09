@@ -88,11 +88,23 @@ class QuestCompleter:
             return result
 
         try:
-            # Step 1: Navigate to quest page
+            # Step 1: Navigate to quest page (with crash recovery)
             quest_url = f"{XENTO_URL}/quests/{quest['slug']}"
             logger.info(f"[Quest {quest_num}] Navigating to {quest_url}")
-            await self.page.goto(quest_url, wait_until="networkidle", timeout=30000)
-            await asyncio.sleep(3)
+            try:
+                await self.page.goto(quest_url, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(3)
+                # Verify page is alive
+                await self.page.evaluate("1+1")
+            except Exception as e:
+                logger.warning(f"[Quest {quest_num}] Page error, retrying: {e}")
+                await asyncio.sleep(2)
+                try:
+                    await self.page.goto(quest_url, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(3)
+                except Exception as e2:
+                    result["error"] = f"Page load failed: {str(e2)[:50]}"
+                    return result
 
             # Step 2: Click "Start quest" button
             start_ok = await self._click_start_quest(quest_num)
