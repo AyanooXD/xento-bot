@@ -33,8 +33,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN python3 -m playwright install chromium --with-deps
+# Install Playwright browsers (deps already installed above)
+RUN python3 -m playwright install chromium
 
 # Copy all bot code
 COPY . .
