@@ -2,8 +2,5 @@
 
 nixPkgs = ["chromium", "nss", "nspr", "atk", "cups", "dbus", "expat", "fontconfig", "freetype", "glib", "libdrm", "libxkbcommon", "mesa", "pango", "systemd", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "xorg.libxcb", "alsa-lib"]
 
-[phases.install]
-cmds = ["playwright install chromium --with-deps"]
-
 [start]
-cmd = "python3 bot.py"
+cmd = "bash start.sh"
